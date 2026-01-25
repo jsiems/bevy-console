@@ -506,7 +506,7 @@ pub(crate) fn console_ui(
 ) {
     let keyboard_input_events = keyboard_input_events.read().collect::<Vec<_>>();
 
-    // If there is no egui context, return, this can happen when exiting the app
+    // If there is no egui context, return (can happen when exiting the app)
     let ctx = if let Ok(ctxt) = egui_context.ctx_mut() {
         ctxt
     } else {
@@ -518,112 +518,65 @@ pub(crate) fn console_ui(
         .any(|code| console_key_pressed(code, &config.keys));
 
     let mut open_status_changed = false;
-    // always close if console open
-    // avoid opening console if typing in another text input
+
+    // Toggle console
     if pressed && (console_open.open || !ctx.wants_keyboard_input()) {
         console_open.open = !console_open.open;
         open_status_changed = true;
     }
 
-    if console_open.open {
-        // Recompute predictions if the buffer changed
-        recompute_predictions(&mut state, &mut cache, config.num_suggestions);
+    if !console_open.open {
+        return;
+    }
 
-        egui::Window::new(&config.title_name)
-            .collapsible(config.collapsible)
-            .default_pos([config.left_pos, config.top_pos])
-            .default_size([config.width, config.height])
-            .resizable(config.resizable)
-            .movable(config.moveable)
-            .title_bar(config.show_title_bar)
-            .frame(egui::Frame {
-                fill: config.background_color,
-                ..Default::default()
-            })
-            .show(ctx, |ui| {
-                ui.style_mut().visuals.extreme_bg_color = config.background_color;
-                ui.style_mut().visuals.override_text_color = Some(config.foreground_color);
+    // Recompute predictions if the buffer changed
+    recompute_predictions(&mut state, &mut cache, config.num_suggestions);
 
-                ui.vertical(|ui| {
-                    const WRITE_AREA_HEIGHT: f32 = 30.0;
-                    let scroll_height = ui.available_height() - WRITE_AREA_HEIGHT;
-                    // Scroll area
-                    ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .stick_to_bottom(true)
-                        .max_height(scroll_height)
-                        .show(ui, |ui| {
-                            ui.vertical(|ui| {
-                                for line in &state.scrollback {
-                                    ui.label(style_ansi_text(line, &config));
-                                }
-                            });
+    egui::Window::new(&config.title_name)
+        .collapsible(config.collapsible)
+        .default_pos([config.left_pos, config.top_pos])
+        .default_size([config.width, config.height])
+        .resizable(config.resizable)
+        .movable(config.moveable)
+        .title_bar(config.show_title_bar)
+        .frame(egui::Frame {
+            fill: config.background_color,
+            ..Default::default()
+        })
+        .show(ctx, |ui| {
+            ui.style_mut().visuals.extreme_bg_color = config.background_color;
+            ui.style_mut().visuals.override_text_color = Some(config.foreground_color);
 
-                            // Scroll to bottom if console just opened
-                            if console_open.is_changed() {
-                                ui.scroll_to_cursor(Some(Align::BOTTOM));
-                            }
-                        });
-
-                    // Separator
+            // ------------------------
+            // Bottom panel: input area
+            // ------------------------
+            egui::TopBottomPanel::bottom("console_input_panel")
+                .exact_height(36.0)
+                .show_inside(ui, |ui| {
                     ui.separator();
 
-                    // Clear line on ctrl+c
-                    if ui.input(|i| i.modifiers.ctrl & i.key_pressed(egui::Key::C)) {
+                    // Ctrl+C clears input
+                    if ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::C)) {
                         state.buf.clear();
                         return;
                     }
 
-                    // Clear history on ctrl+l
-                    if ui.input(|i| i.modifiers.ctrl & i.key_pressed(egui::Key::L)) {
+                    // Ctrl+L clears history
+                    if ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::L)) {
                         state.scrollback.clear();
                         return;
                     }
 
-                    // Input
-                    let text_edit = TextEdit::singleline(&mut state.buf)
+                    let text_edit = egui::TextEdit::singleline(&mut state.buf)
                         .desired_width(f32::INFINITY)
                         .lock_focus(true)
                         .font(egui::TextStyle::Monospace);
 
                     let text_edit_response = ui.add(text_edit);
 
-                    // show a few suggestions
-                    if text_edit_response.has_focus()
-                        && !state.buf.is_empty()
-                        && !cache.prediction_matches_buffer
-                    {
-                        // create the area to show suggestions
-                        let suggestions_area = egui::Area::new(ui.auto_id_with("suggestions"))
-                            .fixed_pos(ui.next_widget_position())
-                            .movable(false);
-
-                        suggestions_area.show(ui.ctx(), |ui| {
-                            ui.set_min_width(config.width);
-
-                            for (i, suggestion) in cache.predictions_cache.iter().enumerate() {
-                                let mut layout_job = egui::text::LayoutJob::default();
-                                let is_highlighted = Some(i) == state.suggestion_index;
-
-                                let mut style = TextFormat {
-                                    font_id: FontId::new(14.0, egui::FontFamily::Monospace),
-                                    color: Color32::WHITE,
-                                    ..default()
-                                };
-
-                                if is_highlighted {
-                                    style.underline = egui::Stroke::new(1., Color32::WHITE);
-                                    style.background = Color32::from_black_alpha(128);
-                                }
-
-                                layout_job.append(suggestion, 0.0, style);
-                                ui.label(layout_job);
-                            }
-                        });
-                    }
-
+                    // Handle enter
                     handle_enter(
-                        config,
+                        &config,
                         &cache,
                         &mut state,
                         command_entered,
@@ -631,7 +584,7 @@ pub(crate) fn console_ui(
                         &text_edit_response,
                     );
 
-                    // Handle up and down through history
+                    // History navigation
                     if text_edit_response.has_focus()
                         && ui.input(|i| i.key_pressed(egui::Key::ArrowUp))
                         && state.history.len() > 1
@@ -642,22 +595,18 @@ pub(crate) fn console_ui(
                         }
 
                         state.history_index += 1;
-                        let previous_item = state.history.get(state.history_index).unwrap().clone();
-                        state.buf = previous_item.to_string();
-
+                        state.buf = state.history[state.history_index].clone();
                         set_cursor_pos(ui.ctx(), text_edit_response.id, state.buf.len());
                     } else if text_edit_response.has_focus()
                         && ui.input(|i| i.key_pressed(egui::Key::ArrowDown))
                         && state.history_index > 0
                     {
                         state.history_index -= 1;
-                        let next_item = state.history.get(state.history_index).unwrap().clone();
-                        state.buf = next_item.to_string();
-
+                        state.buf = state.history[state.history_index].clone();
                         set_cursor_pos(ui.ctx(), text_edit_response.id, state.buf.len());
                     }
 
-                    // handle tab cycling through suggestions
+                    // Tab cycles suggestions
                     if ui.input(|i| i.key_pressed(egui::Key::Tab))
                         && !cache.predictions_cache.is_empty()
                     {
@@ -671,17 +620,68 @@ pub(crate) fn console_ui(
                         }
                     }
 
-                    // Focus on input, when console just opened
+                    // Focus input when console just opened
                     if open_status_changed {
                         ui.memory_mut(|m| m.request_focus(text_edit_response.id));
                     }
+
+                    // Suggestions popup
+                    if text_edit_response.has_focus()
+                        && !state.buf.is_empty()
+                        && !cache.prediction_matches_buffer
+                    {
+                        let suggestions_area = egui::Area::new(ui.auto_id_with("suggestions"))
+                            .fixed_pos(text_edit_response.rect.left_bottom())
+                            .movable(false);
+
+                        suggestions_area.show(ui.ctx(), |ui| {
+                            ui.set_min_width(config.width);
+
+                            for (i, suggestion) in cache.predictions_cache.iter().enumerate() {
+                                let is_highlighted = Some(i) == state.suggestion_index;
+
+                                let mut layout_job = egui::text::LayoutJob::default();
+                                let mut style = egui::TextFormat {
+                                    font_id: egui::FontId::new(14.0, egui::FontFamily::Monospace),
+                                    color: egui::Color32::WHITE,
+                                    ..Default::default()
+                                };
+
+                                if is_highlighted {
+                                    style.underline = egui::Stroke::new(1.0, egui::Color32::WHITE);
+                                    style.background = egui::Color32::from_black_alpha(128);
+                                }
+
+                                layout_job.append(suggestion, 0.0, style);
+                                ui.label(layout_job);
+                            }
+                        });
+                    }
                 });
+
+            // ------------------------
+            // Central panel: scrollback
+            // ------------------------
+            egui::CentralPanel::default().show_inside(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        for line in &state.scrollback {
+                            ui.label(style_ansi_text(line, &config));
+                        }
+
+                        // Scroll to bottom if console just opened
+                        if console_open.is_changed() {
+                            ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
+                        }
+                    });
             });
-    }
+        });
 }
 
 fn handle_enter(
-    config: Res<'_, ConsoleConfiguration>,
+    config: &Res<'_, ConsoleConfiguration>,
     cache: &ResMut<'_, ConsoleCache>,
     state: &mut ResMut<'_, ConsoleState>,
     mut command_entered: MessageWriter<'_, ConsoleCommandEntered>,
